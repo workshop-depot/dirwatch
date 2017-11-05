@@ -160,7 +160,7 @@ func (dw *Watch) onEvent(ev fsnotify.Event, underWatch map[string]struct{}) {
 			// (at least on Ubuntu 16.04, trying to remove, generates an error for
 			// non-existant entry, should be investigated more carefully)
 			delete(underWatch, name)
-		} else {
+		} else if !os.IsNotExist(err) {
 			log.Error(err)
 		}
 		return
