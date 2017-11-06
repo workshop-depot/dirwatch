@@ -71,6 +71,8 @@ func (dw *Watch) agent() error {
 
 	for {
 		select {
+		case <-dw.ctx.Done():
+			return nil
 		case ev := <-watcher.Events:
 			dw.onEvent(ev, underWatch)
 		case err := <-watcher.Errors:
@@ -84,7 +86,11 @@ func (dw *Watch) agent() error {
 func (dw *Watch) prepAgent() {
 	go func() {
 		lastWD := dw.lastWD
-		dw.added <- lastWD
+		select {
+		case <-dw.ctx.Done():
+			return
+		case dw.added <- lastWD:
+		}
 	}()
 
 	go retry.Retry(
@@ -179,6 +185,10 @@ func (dw *Watch) onEvent(ev fsnotify.Event, underWatch map[string]struct{}) {
 	}
 
 	go func() {
-		dw.added <- name
+		select {
+		case <-dw.ctx.Done():
+			return
+		case dw.added <- name:
+		}
 	}()
 }
