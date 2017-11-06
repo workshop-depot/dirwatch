@@ -45,11 +45,18 @@ func New(root string, notify func(fsnotify.Event), ctx ...context.Context) (*Wat
 }
 
 func (dw *Watch) start() {
-	go retry.Retry(
-		dw.agent,
-		-1,
-		func(e error) { log.Errorf("watcher agent error: %+v", e) },
-		time.Second*5)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		retry.Retry(
+			dw.agent,
+			-1,
+			func(e error) { log.Errorf("watcher agent error: %+v", e) },
+			time.Second*5)
+	}()
+	<-started
+	// HACK:
+	<-time.After(time.Millisecond * 500)
 }
 
 // Stop stops the watcher. Watcher would also stop when the parent context
@@ -93,11 +100,16 @@ func (dw *Watch) prepAgent() {
 		}
 	}()
 
-	go retry.Retry(
-		dw.initTree,
-		-1,
-		func(e error) { log.Errorf("init tree error: %+v\n", e) },
-		time.Second*5)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		retry.Retry(
+			dw.initTree,
+			-1,
+			func(e error) { log.Errorf("init tree error: %+v\n", e) },
+			time.Second*5)
+	}()
+	<-started
 }
 
 func (dw *Watch) initTree() error {

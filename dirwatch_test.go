@@ -31,14 +31,12 @@ func TestMain(m *testing.M) {
 	// needs error checking
 	os.Mkdir(rootDirectory, 0777)
 
+	<-time.After(time.Millisecond * 100)
+
 	// needs error checking
 	mainWatch, _ = New(rootDirectory, notify)
 
 	os.Exit(m.Run())
-}
-
-func TestPrep(t *testing.T) {
-	<-time.After(time.Millisecond * 100)
 }
 
 func Test01(t *testing.T) {
@@ -99,9 +97,6 @@ func ExampleNew() {
 	// create the watcher
 	watcher, _ := New(rootDirectory, notify)
 	defer watcher.Stop()
-
-	// give the watcher gotoutine to actually do it's filesystem stuff
-	<-time.After(time.Millisecond * 100)
 
 	// creating a directory inside the root/home
 	dir2 := filepath.Join(rootDirectory, "lab2")
