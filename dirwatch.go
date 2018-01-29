@@ -1,7 +1,6 @@
 package dirwatch
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,32 +15,35 @@ import (
 type Watch struct {
 	root   string
 	added  chan string
-	ctx    context.Context
-	cancel context.CancelFunc
-	lastWD string // last working directory
 	notify func(fsnotify.Event)
+
+	stop   chan struct{}
+	lastWD string // last working directory
 }
 
 // New creates a new *Watch
-func New(root string, notify func(fsnotify.Event), ctx ...context.Context) (*Watch, error) {
+func New(root string, notify func(fsnotify.Event)) *Watch {
 	if notify == nil {
-		return nil, errors.New("notify can not be nil")
+		panic("notify can not be nil")
+	}
+	var err error
+	root, err = filepath.Abs(root)
+	if err != nil {
+		panic(err)
 	}
 	res := &Watch{
 		root:   root,
 		added:  make(chan string),
 		notify: notify,
+		stop:   make(chan struct{}),
 	}
-	var vctx context.Context
-	if len(ctx) > 0 {
-		vctx = ctx[0]
-	}
-	if vctx == nil {
-		vctx = context.Background()
-	}
-	res.ctx, res.cancel = context.WithCancel(vctx)
 	res.start()
-	return res, nil
+	return res
+}
+
+// Stop stops the watcher.
+func (dw *Watch) Stop() {
+	close(dw.stop)
 }
 
 func (dw *Watch) start() {
@@ -59,11 +61,7 @@ func (dw *Watch) start() {
 	<-time.After(time.Millisecond * 500)
 }
 
-// Stop stops the watcher. Watcher would also stop when the parent context
-// be canceled (if provided).
-func (dw *Watch) Stop() {
-	dw.cancel()
-}
+func (dw *Watch) stopped() <-chan struct{} { return dw.stop }
 
 func (dw *Watch) agent() error {
 	watcher, err := fsnotify.NewWatcher()
@@ -78,7 +76,7 @@ func (dw *Watch) agent() error {
 
 	for {
 		select {
-		case <-dw.ctx.Done():
+		case <-dw.stopped():
 			return nil
 		case ev := <-watcher.Events:
 			dw.onEvent(ev, underWatch)
@@ -90,11 +88,84 @@ func (dw *Watch) agent() error {
 	}
 }
 
+func (dw *Watch) onAdd(
+	watcher *fsnotify.Watcher,
+	d string,
+	underWatch map[string]struct{}) {
+	if d == "" {
+		return
+	}
+	d, _ = filepath.Abs(d)
+	_, err := os.Stat(d)
+	if err != nil && os.IsNotExist(err) {
+		return
+	}
+	_, ok := underWatch[d]
+	if ok {
+		return
+	}
+	var (
+		sep = string([]rune{os.PathSeparator})
+	)
+	parts := strings.Split(d, sep)
+	for _, p := range parts {
+		p := strings.ToLower(p)
+		if p == ".git" {
+			return
+		}
+	}
+	underWatch[d] = struct{}{}
+	if err := watcher.Add(d); err != nil {
+		log.Errorf("on add error: %+v\n", errors.WithStack(err))
+	}
+}
+
+func (dw *Watch) onEvent(ev fsnotify.Event, underWatch map[string]struct{}) {
+	// callback
+	go func() { dw.notify(ev) }()
+
+	name := ev.Name
+	info, err := os.Stat(name)
+	if err != nil {
+		_, ok := underWatch[name]
+		if ok && os.IsNotExist(err) {
+			// thoughts, following:
+			// apparently there is no need to explicitly remove watchs
+			// (at least on Ubuntu 16.04, trying to remove, generates an error for
+			// non-existant entry, should be investigated more carefully)
+			delete(underWatch, name)
+		} else if !os.IsNotExist(err) {
+			log.Error(err)
+		}
+		return
+	}
+
+	if info.IsDir() {
+		dw.lastWD = name
+	} else {
+		if wd, err := filepath.Abs(filepath.Dir(name)); err == nil {
+			dw.lastWD = wd
+		}
+	}
+
+	if !info.IsDir() {
+		return
+	}
+
+	go func() {
+		select {
+		case <-dw.stopped():
+			return
+		case dw.added <- name:
+		}
+	}()
+}
+
 func (dw *Watch) prepAgent() {
 	go func() {
 		lastWD := dw.lastWD
 		select {
-		case <-dw.ctx.Done():
+		case <-dw.stopped():
 			return
 		case dw.added <- lastWD:
 		}
@@ -122,85 +193,11 @@ func (dw *Watch) initTree() error {
 			}
 			select {
 			case dw.added <- d:
-			case <-dw.ctx.Done():
+			case <-dw.stopped():
 				return nil
 			}
-		case <-dw.ctx.Done():
+		case <-dw.stopped():
 			return nil
 		}
 	}
-}
-
-func (dw *Watch) onAdd(
-	watcher *fsnotify.Watcher,
-	d string,
-	underWatch map[string]struct{}) {
-	if d == "" {
-		return
-	}
-	_, err := os.Stat(d)
-	if err != nil && os.IsNotExist(err) {
-		return
-	}
-	_, ok := underWatch[d]
-	if ok {
-		return
-	}
-	underWatch[d] = struct{}{}
-	parts := strings.Split(d, sep)
-	for _, p := range parts {
-		p := strings.ToLower(p)
-		if p == ".git" {
-			return
-		}
-	}
-	if err := watcher.Add(d); err != nil {
-		log.Errorf("on add error: %+v\n", errors.WithStack(err))
-	}
-}
-
-func (dw *Watch) onEvent(ev fsnotify.Event, underWatch map[string]struct{}) {
-	// callback
-	go func() { dw.notify(ev) }()
-
-	name := ev.Name
-	info, err := os.Stat(name)
-	if err != nil {
-		_, ok := underWatch[name]
-		if ok && os.IsNotExist(err) {
-			// thoughts:
-			// we need a proper virtual tree of directories
-			// to remove a node and it's children from the watcher,
-			// currently this is about testing an idea (of generics + type aliases)
-
-			// thoughts, following:
-			// apparently there is no need to explicitly remove watchs
-			// (at least on Ubuntu 16.04, trying to remove, generates an error for
-			// non-existant entry, should be investigated more carefully)
-			delete(underWatch, name)
-		} else if !os.IsNotExist(err) {
-			log.Error(err)
-		}
-		return
-	}
-
-	if info.IsDir() {
-		dw.lastWD = name
-	} else {
-		if wd, err := filepath.Abs(filepath.Dir(name)); err == nil {
-			dw.lastWD = wd
-		}
-	}
-
-	if !info.IsDir() {
-		return
-	}
-
-	go func() {
-		select {
-		case <-dw.ctx.Done():
-			return
-		case dw.added <- name:
-		}
-	}()
 }
