@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dc0d/retry"
@@ -11,31 +12,31 @@ import (
 	"github.com/pkg/errors"
 )
 
+// root, err = filepath.Abs(root)
+// if err != nil {
+// 	panic(err)
+// }
+
 // Watch watches over a directory and it's sub-directories, recursively
 type Watch struct {
-	root   string
-	added  chan string
-	notify func(fsnotify.Event)
+	dirList []string
+	added   chan string
+	notify  func(fsnotify.Event)
 
 	stop   chan struct{}
 	lastWD string // last working directory
 }
 
 // New creates a new *Watch
-func New(root string, notify func(fsnotify.Event)) *Watch {
+func New(notify func(fsnotify.Event), dirList ...string) *Watch {
 	if notify == nil {
 		panic("notify can not be nil")
 	}
-	var err error
-	root, err = filepath.Abs(root)
-	if err != nil {
-		panic(err)
-	}
 	res := &Watch{
-		root:   root,
-		added:  make(chan string),
-		notify: notify,
-		stop:   make(chan struct{}),
+		dirList: dirList,
+		added:   make(chan string),
+		notify:  notify,
+		stop:    make(chan struct{}),
 	}
 	res.start()
 	return res
@@ -184,7 +185,27 @@ func (dw *Watch) prepAgent() {
 }
 
 func (dw *Watch) initTree() error {
-	dirs := dirTree(dw.root)
+	dirs := make(chan string)
+	var wg sync.WaitGroup
+	for _, v := range dw.dirList {
+		v := v
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var d <-chan string
+			retry.Try(func() error {
+				d = dirTree(v)
+				return nil
+			})
+			for item := range d {
+				dirs <- item
+			}
+		}()
+	}
+	go func() {
+		defer close(dirs)
+		wg.Wait()
+	}()
 	for {
 		select {
 		case d, ok := <-dirs:

@@ -18,7 +18,7 @@ func init() {
 
 //-----------------------------------------------------------------------------
 
-func dirTree(root string) chan string {
+func dirTree(root string) <-chan string {
 	found := make(chan string)
 	go func() {
 		defer close(found)

@@ -34,7 +34,7 @@ func TestMain(m *testing.M) {
 	<-time.After(time.Millisecond * 100)
 
 	// needs error checking
-	mainWatch = New(rootDirectory, notify)
+	mainWatch = New(notify, rootDirectory)
 
 	os.Exit(m.Run())
 }
@@ -95,7 +95,7 @@ func ExampleNew() {
 	}
 
 	// create the watcher
-	watcher := New(rootDirectory, notify)
+	watcher := New(notify, rootDirectory)
 	defer watcher.Stop()
 
 	// creating a directory inside the root/home
