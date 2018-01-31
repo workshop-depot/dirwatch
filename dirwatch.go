@@ -12,11 +12,6 @@ import (
 	"github.com/pkg/errors"
 )
 
-// root, err = filepath.Abs(root)
-// if err != nil {
-// 	panic(err)
-// }
-
 // Watch watches over a directory and it's sub-directories, recursively
 type Watch struct {
 	dirList []string
@@ -188,7 +183,7 @@ func (dw *Watch) initTree() error {
 	dirs := make(chan string)
 	var wg sync.WaitGroup
 	for _, v := range dw.dirList {
-		v := v
+		v, _ := filepath.Abs(v)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
