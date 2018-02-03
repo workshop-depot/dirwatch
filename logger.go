@@ -2,8 +2,19 @@ package dirwatch
 
 import (
 	"fmt"
+	internalog "log"
 	"sync"
 )
+
+//-----------------------------------------------------------------------------
+
+func init() {
+	if log == nil {
+		internalog.SetPrefix("dirwatch: ")
+		internalog.SetFlags(internalog.Ltime | internalog.Lshortfile)
+		log = LoggerFunc(internalog.Print)
+	}
+}
 
 //-----------------------------------------------------------------------------
 

@@ -12,26 +12,34 @@ import (
 	"github.com/pkg/errors"
 )
 
-// Watch watches over a directory and it's sub-directories, recursively
+// Watch watches over a directory and it's sub-directories, recursively.
+// Also watches files, if the path is explicitly provided.
 type Watch struct {
-	dirList []string
+	pathSet map[string]struct{}
 	added   chan string
 	notify  func(fsnotify.Event)
 
-	stop   chan struct{}
-	lastWD string // last working directory
+	stop chan struct{}
 }
 
 // New creates a new *Watch
-func New(notify func(fsnotify.Event), dirList ...string) *Watch {
+func New(notify func(fsnotify.Event), pathList ...string) *Watch {
 	if notify == nil {
 		panic("notify can not be nil")
 	}
 	res := &Watch{
-		dirList: dirList,
+		pathSet: make(map[string]struct{}),
 		added:   make(chan string),
 		notify:  notify,
 		stop:    make(chan struct{}),
+	}
+	for _, v := range pathList {
+		v, err := filepath.Abs(v)
+		if err != nil {
+			log.Error(err)
+			continue
+		}
+		res.pathSet[v] = struct{}{}
 	}
 	res.start()
 	return res
@@ -136,14 +144,6 @@ func (dw *Watch) onEvent(ev fsnotify.Event, underWatch map[string]struct{}) {
 		return
 	}
 
-	if info.IsDir() {
-		dw.lastWD = name
-	} else {
-		if wd, err := filepath.Abs(filepath.Dir(name)); err == nil {
-			dw.lastWD = wd
-		}
-	}
-
 	if !info.IsDir() {
 		return
 	}
@@ -158,15 +158,6 @@ func (dw *Watch) onEvent(ev fsnotify.Event, underWatch map[string]struct{}) {
 }
 
 func (dw *Watch) prepAgent() {
-	go func() {
-		lastWD := dw.lastWD
-		select {
-		case <-dw.stopped():
-			return
-		case dw.added <- lastWD:
-		}
-	}()
-
 	started := make(chan struct{})
 	go func() {
 		close(started)
@@ -182,8 +173,8 @@ func (dw *Watch) prepAgent() {
 func (dw *Watch) initTree() error {
 	dirs := make(chan string)
 	var wg sync.WaitGroup
-	for _, v := range dw.dirList {
-		v, _ := filepath.Abs(v)
+	for k := range dw.pathSet {
+		v, _ := filepath.Abs(k)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
