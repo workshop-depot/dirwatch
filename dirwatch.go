@@ -12,12 +12,15 @@ import (
 	"github.com/pkg/errors"
 )
 
+//-----------------------------------------------------------------------------
+
 // Watch watches over a directory and it's sub-directories, recursively.
 // Also watches files, if the path is explicitly provided.
+// If a path does no longer exists, it will be removed.
 type Watch struct {
-	pathSet map[string]struct{}
-	added   chan string
-	notify  func(fsnotify.Event)
+	paths  map[string]struct{}
+	add    chan string
+	notify func(fsnotify.Event)
 
 	stop chan struct{}
 }
@@ -28,19 +31,12 @@ func New(notify func(fsnotify.Event), pathList ...string) *Watch {
 		panic("notify can not be nil")
 	}
 	res := &Watch{
-		pathSet: make(map[string]struct{}),
-		added:   make(chan string),
-		notify:  notify,
-		stop:    make(chan struct{}),
+		paths:  make(map[string]struct{}),
+		add:    make(chan string),
+		notify: notify,
+		stop:   make(chan struct{}),
 	}
-	for _, v := range pathList {
-		v, err := filepath.Abs(v)
-		if err != nil {
-			log.Error(err)
-			continue
-		}
-		res.pathSet[v] = struct{}{}
-	}
+	res.Add(pathList...)
 	res.start()
 	return res
 }
@@ -50,6 +46,26 @@ func (dw *Watch) Stop() {
 	close(dw.stop)
 }
 
+// Add paths
+func (dw *Watch) Add(pathList ...string) {
+	go func() {
+		for _, v := range pathList {
+			v, err := filepath.Abs(v)
+			if err != nil {
+				lerror(err)
+				continue
+			}
+			select {
+			case dw.add <- v:
+			case <-dw.stopped():
+				return
+			}
+		}
+	}()
+}
+
+func (dw *Watch) stopped() <-chan struct{} { return dw.stop }
+
 func (dw *Watch) start() {
 	started := make(chan struct{})
 	go func() {
@@ -57,15 +73,13 @@ func (dw *Watch) start() {
 		retry.Retry(
 			dw.agent,
 			-1,
-			func(e error) { log.Errorf("watcher agent error: %+v", e) },
+			func(e error) { lerrorf("watcher agent error: %+v", e) },
 			time.Second*5)
 	}()
 	<-started
 	// HACK:
 	<-time.After(time.Millisecond * 500)
 }
-
-func (dw *Watch) stopped() <-chan struct{} { return dw.stop }
 
 func (dw *Watch) agent() error {
 	watcher, err := fsnotify.NewWatcher()
@@ -76,35 +90,43 @@ func (dw *Watch) agent() error {
 
 	dw.prepAgent()
 
-	underWatch := make(map[string]struct{})
-
 	for {
 		select {
 		case <-dw.stopped():
 			return nil
 		case ev := <-watcher.Events:
-			dw.onEvent(ev, underWatch)
+			dw.onEvent(ev)
 		case err := <-watcher.Errors:
-			log.Errorf("error: %+v\n", errors.WithStack(err))
-		case d := <-dw.added:
-			dw.onAdd(watcher, d, underWatch)
+			lerrorf("error: %+v\n", errors.WithStack(err))
+		case d := <-dw.add:
+			dw.onAdd(watcher, d)
 		}
 	}
 }
 
 func (dw *Watch) onAdd(
 	watcher *fsnotify.Watcher,
-	d string,
-	underWatch map[string]struct{}) {
+	d string) {
+
 	if d == "" {
 		return
 	}
-	d, _ = filepath.Abs(d)
-	_, err := os.Stat(d)
-	if err != nil && os.IsNotExist(err) {
+	var err error
+	d, err = filepath.Abs(d)
+	if err != nil {
+		lerror(err)
 		return
 	}
-	_, ok := underWatch[d]
+	_, err = os.Stat(d)
+	if err != nil {
+		if os.IsNotExist(err) {
+			delete(dw.paths, d)
+			return
+		}
+		lerror(err)
+		return
+	}
+	_, ok := dw.paths[d]
 	if ok {
 		return
 	}
@@ -118,33 +140,28 @@ func (dw *Watch) onAdd(
 			return
 		}
 	}
-	underWatch[d] = struct{}{}
 	if err := watcher.Add(d); err != nil {
-		log.Errorf("on add error: %+v\n", errors.WithStack(err))
+		lerrorf("on add error: %+v\n", errors.WithStack(err))
 	}
+	dw.paths[d] = struct{}{}
 }
 
-func (dw *Watch) onEvent(ev fsnotify.Event, underWatch map[string]struct{}) {
+func (dw *Watch) onEvent(ev fsnotify.Event) {
 	// callback
-	go func() { dw.notify(ev) }()
+	go retry.Try(func() error { dw.notify(ev); return nil })
 
 	name := ev.Name
-	info, err := os.Stat(name)
+	isdir, err := isDir(name)
 	if err != nil {
-		_, ok := underWatch[name]
-		if ok && os.IsNotExist(err) {
-			// thoughts, following:
-			// apparently there is no need to explicitly remove watchs
-			// (at least on Ubuntu 16.04, trying to remove, generates an error for
-			// non-existant entry, should be investigated more carefully)
-			delete(underWatch, name)
-		} else if !os.IsNotExist(err) {
-			log.Error(err)
+		if os.IsNotExist(err) {
+			delete(dw.paths, name)
+		} else {
+			lerror(err)
 		}
 		return
 	}
 
-	if !info.IsDir() {
+	if !isdir {
 		return
 	}
 
@@ -152,29 +169,40 @@ func (dw *Watch) onEvent(ev fsnotify.Event, underWatch map[string]struct{}) {
 		select {
 		case <-dw.stopped():
 			return
-		case dw.added <- name:
+		case dw.add <- name:
 		}
 	}()
 }
 
 func (dw *Watch) prepAgent() {
 	started := make(chan struct{})
+	paths := make(map[string]struct{})
+	for k, v := range dw.paths {
+		paths[k] = v
+	}
 	go func() {
 		close(started)
 		retry.Retry(
-			dw.initTree,
+			func() error { return initTree(paths, dw.add, dw.stopped()) },
 			-1,
-			func(e error) { log.Errorf("init tree error: %+v\n", e) },
+			func(e error) { lerrorf("init tree error: %+v\n", e) },
 			time.Second*5)
 	}()
 	<-started
 }
 
-func (dw *Watch) initTree() error {
-	dirs := make(chan string)
+func initTree(
+	current map[string]struct{},
+	add chan<- string,
+	stop <-chan struct{}) error {
+	paths := make(chan string)
 	var wg sync.WaitGroup
-	for k := range dw.pathSet {
-		v, _ := filepath.Abs(k)
+	for k := range current {
+		v, err := filepath.Abs(k)
+		if err != nil {
+			lerror(err)
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -184,27 +212,66 @@ func (dw *Watch) initTree() error {
 				return nil
 			})
 			for item := range d {
-				dirs <- item
+				paths <- item
 			}
 		}()
 	}
 	go func() {
-		defer close(dirs)
+		defer close(paths)
 		wg.Wait()
 	}()
 	for {
 		select {
-		case d, ok := <-dirs:
+		case d, ok := <-paths:
 			if !ok {
 				return nil
 			}
 			select {
-			case dw.added <- d:
-			case <-dw.stopped():
+			case add <- d:
+			case <-stop:
 				return nil
 			}
-		case <-dw.stopped():
+		case <-stop:
 			return nil
 		}
 	}
 }
+
+//-----------------------------------------------------------------------------
+
+func dirTree(root string) <-chan string {
+	found := make(chan string)
+	go func() {
+		defer close(found)
+		ok, err := isDir(root)
+		if err != nil {
+			lerror(err)
+			return
+		}
+		if !ok {
+			found <- root
+			return
+		}
+		err = filepath.Walk(root, func(path string, f os.FileInfo, err error) error {
+			if !f.IsDir() {
+				return nil
+			}
+			found <- path
+			return nil
+		})
+		if err != nil {
+			lerrorf("%+v", errors.WithStack(err))
+		}
+	}()
+	return found
+}
+
+func isDir(path string) (bool, error) {
+	inf, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	return inf.IsDir(), nil
+}
+
+//-----------------------------------------------------------------------------

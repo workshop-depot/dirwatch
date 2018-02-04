@@ -15,7 +15,7 @@ import (
 
 var rootDirectory string
 var mainWatch *Watch
-var events = make(chan fsnotify.Event, 100)
+var events = make(chan fsnotify.Event, 1000)
 
 func notify(ev fsnotify.Event) {
 	events <- ev
@@ -42,7 +42,7 @@ func TestMain(m *testing.M) {
 func Test01(t *testing.T) {
 	assert := assert.New(t)
 
-	SetLogger(LoggerFunc(t.Log))
+	_errlog = t.Log
 
 	dir1 := filepath.Join(rootDirectory, "lab1")
 	os.Remove(dir1)
