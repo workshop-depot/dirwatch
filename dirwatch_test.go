@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,7 +40,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func Test01(t *testing.T) {
+func TestCreateDir(t *testing.T) {
 	assert := assert.New(t)
 
 	_errlog = t.Log
@@ -76,6 +77,99 @@ func Test01(t *testing.T) {
 		}
 	}
 	assert.NotEqual(0, fileCount)
+}
+
+func TestCreateDirFile(t *testing.T) {
+	assert := assert.New(t)
+
+	var wg sync.WaitGroup
+	_errlog = t.Log
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 1; i <= 100; i++ {
+			name := fmt.Sprintf("%06d-dir", i)
+			d := filepath.Join(rootDirectory, name)
+			os.Remove(d)
+			assert.NoError(os.Mkdir(d, 0777))
+		}
+
+		<-time.After(time.Millisecond * 150)
+
+		for i := 1; i <= 100; i++ {
+			name := fmt.Sprintf("%06d-dir", i)
+			d := filepath.Join(rootDirectory, name)
+
+			fp := fmt.Sprintf("%06d-file", i)
+			fp = filepath.Join(d, fp)
+			f, err := os.Create(fp)
+			assert.NoError(err)
+			assert.NoError(f.Close())
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		dirs := 0
+		files := 0
+		defer wg.Done()
+		for i := 1; i <= 200; i++ {
+			select {
+			case ev := <-events:
+				if strings.Contains(ev.Name, "-dir") {
+					dirs++
+				}
+				if strings.Contains(ev.Name, "-file") {
+					files++
+				}
+				assert.Equal(ev.Op, fsnotify.Create)
+			case <-time.After(time.Second * 3):
+				assert.Fail("noevents")
+				return
+			}
+		}
+		assert.Equal(200, dirs)
+		assert.Equal(100, files)
+	}()
+
+	wg.Wait()
+}
+
+func TestAddWatchFile(t *testing.T) {
+	assert := assert.New(t)
+	var wg sync.WaitGroup
+	_errlog = t.Log
+
+	fp := filepath.Join(os.TempDir(), fmt.Sprintf("test03-%v", time.Now().UnixNano()))
+	f, err := os.Create(fp)
+	assert.NoError(err)
+	assert.NoError(f.Close())
+
+	<-time.After(time.Millisecond * 100)
+	mainWatch.Add(fp)
+	<-time.After(time.Millisecond * 150)
+
+	// test this without -race (?)
+	// _, ok := mainWatch.paths[fp]
+	// assert.True(ok)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		select {
+		case ev := <-events:
+			assert.Contains(ev.Name, "test03")
+			assert.Equal(ev.Op, fsnotify.Write)
+		case <-time.After(time.Second * 3):
+			assert.Fail("noevents")
+			return
+		}
+	}()
+
+	assert.NoError(ioutil.WriteFile(fp, []byte("DATA"), 0777))
+
+	wg.Wait()
 }
 
 func ExampleNew() {
