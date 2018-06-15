@@ -174,7 +174,7 @@ func TestAddWatchFile(t *testing.T) {
 
 func ExampleNew() {
 	// prepare sample home directory to watch over
-	rootDirectory, err := ioutil.TempDir("", "dirwatch-example")
+	rootDirectory, err := ioutil.TempDir(os.TempDir(), "dirwatch-example")
 	if err != nil {
 		panic(err)
 	}
