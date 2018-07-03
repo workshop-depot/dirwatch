@@ -53,7 +53,8 @@ func (dw *Watcher) Stop() {
 	dw.cancel()
 }
 
-// AddSingle paths
+// AddSingle adds individual paths that won't be watched recursively. For a
+// dir-path to be watched recursively, it should be passed to New.
 func (dw *Watcher) AddSingle(pathList ...string) {
 	go func() {
 		for _, v := range pathList {
