@@ -2,6 +2,7 @@ package dirwatch
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,30 +21,68 @@ type Event = fsnotify.Event
 
 //-----------------------------------------------------------------------------
 
+type opt struct {
+	pathList []string
+	notify   func(Event)
+	exclude  []string
+}
+
+// Option sets a specific setting.
+type Option func(*opt)
+
+// Exclude add path patterns that will be excluded from watch list.
+func Exclude(exclude ...string) Option {
+	return func(o *opt) {
+		o.exclude = append(o.exclude, exclude...)
+	}
+}
+
+// Notify sets the callback that will be called on each fs event.
+func Notify(notify func(Event)) Option {
+	return func(o *opt) {
+		o.notify = notify
+	}
+}
+
+// Paths add pathList to list of locations to be recursively watched.
+func Paths(pathList ...string) Option {
+	return func(o *opt) {
+		o.pathList = append(o.pathList, pathList...)
+	}
+}
+
 // Watcher watches over a directory and it's sub-directories (passed to New), recursively.
 // Also watches files, if the path is explicitly provided.
 // If a path does no longer exists, it will be removed.
 type Watcher struct {
+	notify  func(Event)
+	exclude []string
+
 	paths  map[string]struct{}
 	add    chan string
-	notify func(Event)
-
 	ctx    context.Context
 	cancel context.CancelFunc
 }
 
 // New creates a new *Watcher
-func New(notify func(Event), pathList ...string) *Watcher {
-	if notify == nil {
+func New(options ...Option) *Watcher {
+	op := new(opt)
+	for _, v := range options {
+		v(op)
+	}
+	if op.notify == nil {
 		panic("notify can not be nil")
 	}
+
 	res := &Watcher{
-		paths:  make(map[string]struct{}),
-		add:    make(chan string),
-		notify: notify,
+		add:     make(chan string),
+		paths:   make(map[string]struct{}),
+		notify:  op.notify,
+		exclude: op.exclude,
 	}
 	res.ctx, res.cancel = context.WithCancel(context.Background())
-	res.AddSingle(pathList...)
+
+	res.AddSingle(op.pathList...)
 	res.start()
 	return res
 }
@@ -57,11 +96,23 @@ func (dw *Watcher) Stop() {
 // dir-path to be watched recursively, it should be passed to New.
 func (dw *Watcher) AddSingle(pathList ...string) {
 	go func() {
+	NEXT_PATH:
 		for _, v := range pathList {
 			v, err := filepath.Abs(v)
 			if err != nil {
 				lerror(err)
 				continue
+			}
+			for _, ptrn := range dw.exclude {
+				matched, err := filepath.Match(ptrn, v)
+				if err != nil {
+					fmt.Println(err)
+					lerror(err)
+					continue
+				}
+				if matched {
+					continue NEXT_PATH
+				}
 			}
 			select {
 			case dw.add <- v:
@@ -206,6 +257,7 @@ func initTree(
 	paths := make(chan string)
 	var wg sync.WaitGroup
 	for k := range current {
+		k := k
 		v, err := filepath.Abs(k)
 		if err != nil {
 			lerror(err)
@@ -214,9 +266,9 @@ func initTree(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			var d <-chan string
+			d := make(chan string, 10)
 			retry.Try(func() error {
-				d = dirTree(v)
+				dirTree(v, d)
 				return nil
 			})
 			for item := range d {
@@ -247,8 +299,7 @@ func initTree(
 
 //-----------------------------------------------------------------------------
 
-func dirTree(root string) <-chan string {
-	found := make(chan string)
+func dirTree(root string, found chan string) {
 	go func() {
 		defer close(found)
 		ok, err := isDir(root)
@@ -271,7 +322,6 @@ func dirTree(root string) <-chan string {
 			lerrorf("%+v", errors.WithStack(err))
 		}
 	}()
-	return found
 }
 
 func isDir(path string) (bool, error) {

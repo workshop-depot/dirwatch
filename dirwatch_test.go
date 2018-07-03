@@ -16,9 +16,9 @@ import (
 
 var rootDirectory string
 var mainWatch *Watcher
-var events = make(chan fsnotify.Event, 1000)
+var events = make(chan Event, 1000)
 
-func notify(ev fsnotify.Event) {
+func notify(ev Event) {
 	events <- ev
 }
 
@@ -35,7 +35,7 @@ func TestMain(m *testing.M) {
 	<-time.After(time.Millisecond * 100)
 
 	// needs error checking
-	mainWatch = New(notify, rootDirectory)
+	mainWatch = New(Notify(notify), Paths(rootDirectory))
 
 	os.Exit(m.Run())
 }
@@ -183,13 +183,13 @@ func ExampleNew() {
 
 	// our notification callback (I feel it's simpler to
 	// have a callback instead of passing a channel in an API)
-	var events = make(chan fsnotify.Event, 100)
-	notify := func(ev fsnotify.Event) {
+	var events = make(chan Event, 100)
+	notify := func(ev Event) {
 		events <- ev
 	}
 
 	// create the watcher
-	watcher := New(notify, rootDirectory)
+	watcher := New(Notify(notify), Paths(rootDirectory))
 	defer watcher.Stop()
 
 	// creating a directory inside the root/home
@@ -210,6 +210,69 @@ func ExampleNew() {
 		}
 	case <-time.After(time.Second * 3):
 	}
+
+	// Output:
+	// OK
+}
+
+func ExampleExclude() {
+	// prepare sample home directory to watch over
+	// rootDirectory, err := ioutil.TempDir(os.TempDir(), "dirwatch-example-")
+	rootDirectory := filepath.Join(os.TempDir(), "dirwatch-example-exclude")
+	os.RemoveAll(rootDirectory)
+	os.Mkdir(rootDirectory, 0777)
+
+	os.MkdirAll(filepath.Join(rootDirectory, "node_modules"), 0777)
+	os.MkdirAll(filepath.Join(rootDirectory, "lab1"), 0777)
+	os.MkdirAll(filepath.Join(rootDirectory, "lab2"), 0777)
+
+	// our notification callback (I feel it's simpler to
+	// have a callback instead of passing a channel in an API)
+	var events = make(chan Event, 100)
+	notify := func(ev Event) {
+		events <- ev
+	}
+
+	// create the watcher
+	watcher := New(Notify(notify), Paths(rootDirectory), Exclude("node_modules"))
+	defer watcher.Stop()
+	<-time.After(time.Millisecond * 500)
+
+	go func() {
+		defer func() {
+			events <- Event{Name: "ALLDONE"}
+		}()
+		<-time.After(time.Millisecond * 10)
+		if err := ioutil.WriteFile(filepath.Join(rootDirectory, "node_modules", "LVL2.txt"), []byte("TEST"), 0777); err != nil {
+			panic(err)
+		}
+		<-time.After(time.Millisecond * 10)
+		if err := ioutil.WriteFile(filepath.Join(rootDirectory, "lab1", "LVL2.txt"), []byte("TEST"), 0777); err != nil {
+			panic(err)
+		}
+		<-time.After(time.Millisecond * 10)
+		if err := ioutil.WriteFile(filepath.Join(rootDirectory, "lab2", "LVL2.txt"), []byte("TEST"), 0777); err != nil {
+			panic(err)
+		}
+		<-time.After(time.Millisecond * 10)
+	}()
+
+	for v := range events {
+		if v.Name == "ALLDONE" {
+			break
+		}
+		fmt.Println(v.Name)
+		// fmt.Println(filepath.Base(v.Name))
+	}
+
+	// select {
+	// case ev := <-events:
+	// 	if strings.Contains(ev.Name, "dirwatch-example") &&
+	// 		strings.Contains(ev.Name, "lab2") && ev.Op == fsnotify.Create {
+	// 		fmt.Println("OK")
+	// 	}
+	// case <-time.After(time.Second * 3):
+	// }
 
 	// Output:
 	// OK
