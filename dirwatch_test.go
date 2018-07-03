@@ -15,7 +15,7 @@ import (
 )
 
 var rootDirectory string
-var mainWatch *Watch
+var mainWatch *Watcher
 var events = make(chan fsnotify.Event, 1000)
 
 func notify(ev fsnotify.Event) {
@@ -147,7 +147,7 @@ func TestAddWatchFile(t *testing.T) {
 	assert.NoError(f.Close())
 
 	<-time.After(time.Millisecond * 100)
-	mainWatch.Add(fp)
+	mainWatch.AddSingle(fp)
 	<-time.After(time.Millisecond * 150)
 
 	// test this without -race (?)

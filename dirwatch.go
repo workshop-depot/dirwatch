@@ -1,6 +1,7 @@
 package dirwatch
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,40 +15,46 @@ import (
 
 //-----------------------------------------------------------------------------
 
-// Watch watches over a directory and it's sub-directories, recursively.
+// Event represents a single file system notification.
+type Event = fsnotify.Event
+
+//-----------------------------------------------------------------------------
+
+// Watcher watches over a directory and it's sub-directories (passed to New), recursively.
 // Also watches files, if the path is explicitly provided.
 // If a path does no longer exists, it will be removed.
-type Watch struct {
+type Watcher struct {
 	paths  map[string]struct{}
 	add    chan string
-	notify func(fsnotify.Event)
+	notify func(Event)
 
-	stop chan struct{}
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
-// New creates a new *Watch
-func New(notify func(fsnotify.Event), pathList ...string) *Watch {
+// New creates a new *Watcher
+func New(notify func(Event), pathList ...string) *Watcher {
 	if notify == nil {
 		panic("notify can not be nil")
 	}
-	res := &Watch{
+	res := &Watcher{
 		paths:  make(map[string]struct{}),
 		add:    make(chan string),
 		notify: notify,
-		stop:   make(chan struct{}),
 	}
-	res.Add(pathList...)
+	res.ctx, res.cancel = context.WithCancel(context.Background())
+	res.AddSingle(pathList...)
 	res.start()
 	return res
 }
 
-// Stop stops the watcher.
-func (dw *Watch) Stop() {
-	close(dw.stop)
+// Stop stops the watcher. Safe to be called mutiple times.
+func (dw *Watcher) Stop() {
+	dw.cancel()
 }
 
-// Add paths
-func (dw *Watch) Add(pathList ...string) {
+// AddSingle paths
+func (dw *Watcher) AddSingle(pathList ...string) {
 	go func() {
 		for _, v := range pathList {
 			v, err := filepath.Abs(v)
@@ -64,9 +71,9 @@ func (dw *Watch) Add(pathList ...string) {
 	}()
 }
 
-func (dw *Watch) stopped() <-chan struct{} { return dw.stop }
+func (dw *Watcher) stopped() <-chan struct{} { return dw.ctx.Done() }
 
-func (dw *Watch) start() {
+func (dw *Watcher) start() {
 	started := make(chan struct{})
 	go func() {
 		close(started)
@@ -81,7 +88,7 @@ func (dw *Watch) start() {
 	<-time.After(time.Millisecond * 500)
 }
 
-func (dw *Watch) agent() error {
+func (dw *Watcher) agent() error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return errors.WithStack(err)
@@ -104,7 +111,7 @@ func (dw *Watch) agent() error {
 	}
 }
 
-func (dw *Watch) onAdd(
+func (dw *Watcher) onAdd(
 	watcher *fsnotify.Watcher,
 	d string) {
 
@@ -146,7 +153,7 @@ func (dw *Watch) onAdd(
 	dw.paths[d] = struct{}{}
 }
 
-func (dw *Watch) onEvent(ev fsnotify.Event) {
+func (dw *Watcher) onEvent(ev Event) {
 	// callback
 	go retry.Try(func() error { dw.notify(ev); return nil })
 
@@ -174,7 +181,7 @@ func (dw *Watch) onEvent(ev fsnotify.Event) {
 	}()
 }
 
-func (dw *Watch) prepAgent() {
+func (dw *Watcher) prepAgent() {
 	started := make(chan struct{})
 	paths := make(map[string]struct{})
 	for k, v := range dw.paths {
