@@ -31,7 +31,7 @@ func TestNew(t *testing.T) {
 	}
 
 	// create the watcher
-	watcher := New(notify)
+	watcher := New(Notify(notify))
 	defer watcher.Stop()
 
 	watcher.Add(rootDirectory, true)
@@ -101,6 +101,34 @@ T1:
 	require.Condition(func() bool { return count >= 2 })
 }
 
+func prep() string {
+	rootDirectory := filepath.Join(os.TempDir(), "dirwatch-example-exclude")
+	if err := os.RemoveAll(rootDirectory); err != nil {
+		panic(err)
+	}
+	os.Mkdir(rootDirectory, 0777)
+	return rootDirectory
+}
+
+func ExampleWatcher_simple() {
+	dir := prep()
+
+	notify := func(ev Event) {
+		fmt.Println(filepath.Base(ev.Name))
+	}
+
+	// create the watcher
+	watcher := New(Notify(notify))
+	defer watcher.Stop()
+	watcher.Add(dir, true)
+
+	ioutil.WriteFile(filepath.Join(dir, "text.txt"), nil, 0777)
+	<-time.After(time.Millisecond * 100)
+
+	// Output:
+	// text.txt
+}
+
 func ExampleWatcher_recursive() {
 	// prepare sample home directory to watch over
 	// rootDirectory, err := ioutil.TempDir(os.TempDir(), "dirwatch-example-")
@@ -120,7 +148,7 @@ func ExampleWatcher_recursive() {
 	}
 
 	// create the watcher
-	watcher := New(notify, "/*/*/node_modules")
+	watcher := New(Notify(notify), Exclude("/*/*/node_modules"))
 	defer watcher.Stop()
 	watcher.Add(rootDirectory, true)
 	<-time.After(time.Millisecond * 500)
@@ -175,7 +203,7 @@ func ExampleWatcher_simpleExclude() {
 	}
 
 	// create the watcher
-	watcher := New(notify, "/*/*/node_modules")
+	watcher := New(Notify(notify), Exclude("/*/*/node_modules"))
 	defer watcher.Stop()
 	watcher.Add(rootDirectory, true)
 	<-time.After(time.Millisecond * 500)

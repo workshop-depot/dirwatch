@@ -2,6 +2,8 @@ package dirwatch
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -18,10 +20,43 @@ type Event = fsnotify.Event
 
 //-----------------------------------------------------------------------------
 
+type options struct {
+	notify  func(Event)
+	exclude []string
+	logger  func(args ...interface{})
+}
+
+// Option modifies the options.
+type Option func(*options)
+
+// Notify sets the notify callback.
+func Notify(notify func(Event)) Option {
+	return func(opt *options) {
+		opt.notify = notify
+	}
+}
+
+// Exclude sets patterns to exclude from watch.
+func Exclude(exclude ...string) Option {
+	return func(opt *options) {
+		opt.exclude = exclude
+	}
+}
+
+// Logger sets the logger for the watcher.
+func Logger(logger func(args ...interface{})) Option {
+	return func(opt *options) {
+		opt.logger = logger
+	}
+}
+
+//-----------------------------------------------------------------------------
+
 // Watcher watches over a directory and it's sub-directories, recursively.
 type Watcher struct {
 	notify  func(Event)
 	exclude []string
+	logger  func(args ...interface{})
 
 	paths  map[string]bool
 	add    chan fspath
@@ -36,16 +71,23 @@ type fspath struct {
 
 // New creates a new *Watcher. Excluded patterns are based on
 // filepath.Match function patterns.
-func New(notify func(Event), exclude ...string) *Watcher {
-	if notify == nil {
+func New(opt ...Option) *Watcher {
+	o := &options{}
+	for _, v := range opt {
+		v(o)
+	}
+	if o.notify == nil {
 		panic("notify can not be nil")
+	}
+	if o.logger == nil {
+		o.logger = log.Println
 	}
 
 	res := &Watcher{
 		add:     make(chan fspath),
 		paths:   make(map[string]bool),
-		notify:  notify,
-		exclude: exclude,
+		notify:  o.notify,
+		exclude: o.exclude,
 	}
 	res.ctx, res.cancel = context.WithCancel(context.Background())
 
@@ -65,7 +107,7 @@ func (dw *Watcher) Add(path string, recursive bool) {
 		close(started)
 		v, err := filepath.Abs(path)
 		if err != nil {
-			lerror(err)
+			dw.logger(err)
 			return
 		}
 		select {
@@ -88,7 +130,7 @@ func (dw *Watcher) start() {
 		retry.Retry(
 			dw.agent,
 			-1,
-			func(e error) { lerrorf("watcher agent error: %+v", e) },
+			func(e error) { dw.logger(fmt.Sprintf("watcher agent error: %+v", e)) },
 			time.Second*5)
 	}()
 	<-started
@@ -110,7 +152,7 @@ func (dw *Watcher) agent() error {
 		case ev := <-watcher.Events:
 			dw.onEvent(ev)
 		case err := <-watcher.Errors:
-			lerrorf("error: %+v\n", errors.WithStack(err))
+			dw.logger(fmt.Sprintf("error: %+v\n", errors.WithStack(err)))
 		case d := <-dw.add:
 			dw.onAdd(watcher, d)
 		}
@@ -126,7 +168,7 @@ func (dw *Watcher) onAdd(
 	var err error
 	fsp.path, err = filepath.Abs(fsp.path)
 	if err != nil {
-		lerror(err)
+		dw.logger(err)
 		return
 	}
 	_, err = os.Stat(fsp.path)
@@ -135,7 +177,7 @@ func (dw *Watcher) onAdd(
 			delete(dw.paths, fsp.path)
 			return
 		}
-		lerror(err)
+		dw.logger(err)
 		return
 	}
 	_, ok := dw.paths[fsp.path]
@@ -146,7 +188,7 @@ func (dw *Watcher) onAdd(
 		return
 	}
 	if err := watcher.Add(fsp.path); err != nil {
-		lerrorf("on add error: %+v\n", errors.WithStack(err))
+		dw.logger(fmt.Sprintf("on add error: %+v\n", errors.WithStack(err)))
 	}
 	recursive, _ := dw.paths[fsp.path]
 	if fsp.recursive != nil {
@@ -156,7 +198,7 @@ func (dw *Watcher) onAdd(
 	isd, _ := isDir(fsp.path)
 	if recursive && isd {
 		go func() {
-			tree := dirTree(fsp.path)
+			tree := dw.dirTree(fsp.path)
 			for v := range tree {
 				dw.add <- fspath{path: v}
 			}
@@ -177,7 +219,7 @@ func (dw *Watcher) onEvent(ev Event) {
 		if os.IsNotExist(err) {
 			delete(dw.paths, name)
 		} else {
-			lerror(err)
+			dw.logger(err)
 		}
 		return
 	}
@@ -199,7 +241,7 @@ func (dw *Watcher) excludePath(p string) bool {
 	for _, ptrn := range dw.exclude {
 		matched, err := filepath.Match(ptrn, p)
 		if err != nil {
-			lerror(err)
+			dw.logger(err)
 			continue
 		}
 		if matched {
@@ -209,7 +251,7 @@ func (dw *Watcher) excludePath(p string) bool {
 	return false
 }
 
-func dirTree(queryRoot string) <-chan string {
+func (dw *Watcher) dirTree(queryRoot string) <-chan string {
 	found := make(chan string)
 	go func() {
 		defer close(found)
@@ -224,7 +266,7 @@ func dirTree(queryRoot string) <-chan string {
 			return nil
 		})
 		if err != nil {
-			lerrorf("%+v", errors.WithStack(err))
+			dw.logger(fmt.Sprintf("%+v", errors.WithStack(err)))
 		}
 	}()
 	return found
