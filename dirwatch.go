@@ -2,11 +2,8 @@ package dirwatch
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/dc0d/retry"
@@ -21,68 +18,36 @@ type Event = fsnotify.Event
 
 //-----------------------------------------------------------------------------
 
-type opt struct {
-	pathList []string
-	notify   func(Event)
-	exclude  []string
-}
-
-// Option sets a specific setting.
-type Option func(*opt)
-
-// Exclude add path patterns that will be excluded from watch list.
-func Exclude(exclude ...string) Option {
-	return func(o *opt) {
-		o.exclude = append(o.exclude, exclude...)
-	}
-}
-
-// Notify sets the callback that will be called on each fs event.
-func Notify(notify func(Event)) Option {
-	return func(o *opt) {
-		o.notify = notify
-	}
-}
-
-// Paths add pathList to list of locations to be recursively watched.
-func Paths(pathList ...string) Option {
-	return func(o *opt) {
-		o.pathList = append(o.pathList, pathList...)
-	}
-}
-
-// Watcher watches over a directory and it's sub-directories (passed to New), recursively.
-// Also watches files, if the path is explicitly provided.
-// If a path does no longer exists, it will be removed.
+// Watcher watches over a directory and it's sub-directories, recursively.
 type Watcher struct {
 	notify  func(Event)
 	exclude []string
 
-	paths  map[string]struct{}
-	add    chan string
+	paths  map[string]bool
+	add    chan fspath
 	ctx    context.Context
 	cancel context.CancelFunc
 }
 
+type fspath struct {
+	path      string
+	recursive *bool
+}
+
 // New creates a new *Watcher
-func New(options ...Option) *Watcher {
-	op := new(opt)
-	for _, v := range options {
-		v(op)
-	}
-	if op.notify == nil {
+func New(notify func(Event), exclude ...string) *Watcher {
+	if notify == nil {
 		panic("notify can not be nil")
 	}
 
 	res := &Watcher{
-		add:     make(chan string),
-		paths:   make(map[string]struct{}),
-		notify:  op.notify,
-		exclude: op.exclude,
+		add:     make(chan fspath),
+		paths:   make(map[string]bool),
+		notify:  notify,
+		exclude: exclude,
 	}
 	res.ctx, res.cancel = context.WithCancel(context.Background())
 
-	res.AddSingle(op.pathList...)
 	res.start()
 	return res
 }
@@ -92,36 +57,26 @@ func (dw *Watcher) Stop() {
 	dw.cancel()
 }
 
-// AddSingle adds individual paths that won't be watched recursively. For a
-// dir-path to be watched recursively, it should be passed to New.
-func (dw *Watcher) AddSingle(pathList ...string) {
+// Add adds a path to be watched.
+func (dw *Watcher) Add(path string, recursive bool) {
+	started := make(chan struct{})
 	go func() {
-	NEXT_PATH:
-		for _, v := range pathList {
-			v, err := filepath.Abs(v)
-			if err != nil {
-				lerror(err)
-				continue
-			}
-			for _, ptrn := range dw.exclude {
-				matched, err := filepath.Match(ptrn, v)
-				if err != nil {
-					fmt.Println(err)
-					lerror(err)
-					continue
-				}
-				if matched {
-					continue NEXT_PATH
-				}
-			}
-			select {
-			case dw.add <- v:
-			case <-dw.stopped():
-				return
-			}
+		close(started)
+		v, err := filepath.Abs(path)
+		if err != nil {
+			lerror(err)
+			return
+		}
+		select {
+		case dw.add <- fspath{path: v, recursive: &recursive}:
+		case <-dw.stopped():
+			return
 		}
 	}()
+	<-started
 }
+
+//-----------------------------------------------------------------------------
 
 func (dw *Watcher) stopped() <-chan struct{} { return dw.ctx.Done() }
 
@@ -147,8 +102,6 @@ func (dw *Watcher) agent() error {
 	}
 	defer watcher.Close()
 
-	dw.prepAgent()
-
 	for {
 		select {
 		case <-dw.stopped():
@@ -165,47 +118,54 @@ func (dw *Watcher) agent() error {
 
 func (dw *Watcher) onAdd(
 	watcher *fsnotify.Watcher,
-	d string) {
-
-	if d == "" {
+	fsp fspath) {
+	if fsp.path == "" {
 		return
 	}
 	var err error
-	d, err = filepath.Abs(d)
+	fsp.path, err = filepath.Abs(fsp.path)
 	if err != nil {
 		lerror(err)
 		return
 	}
-	_, err = os.Stat(d)
+	_, err = os.Stat(fsp.path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			delete(dw.paths, d)
+			delete(dw.paths, fsp.path)
 			return
 		}
 		lerror(err)
 		return
 	}
-	_, ok := dw.paths[d]
+	recursive, ok := dw.paths[fsp.path]
 	if ok {
 		return
 	}
-	var (
-		sep = string([]rune{os.PathSeparator})
-	)
-	parts := strings.Split(d, sep)
-	for _, p := range parts {
-		p := strings.ToLower(p)
-		if p == ".git" {
-			return
-		}
+	if dw.excludePath(fsp.path) {
+		return
 	}
-	if err := watcher.Add(d); err != nil {
+	if err := watcher.Add(fsp.path); err != nil {
 		lerrorf("on add error: %+v\n", errors.WithStack(err))
 	}
-	dw.paths[d] = struct{}{}
+	if fsp.recursive != nil {
+		recursive = *fsp.recursive
+	}
+	dw.paths[fsp.path] = recursive
+	isd, _ := isDir(fsp.path)
+	if recursive && isd {
+		go func() {
+			tree := dirTree(fsp.path)
+			for v := range tree {
+				dw.add <- fspath{path: v}
+			}
+		}()
+	}
 }
 
 func (dw *Watcher) onEvent(ev Event) {
+	if dw.excludePath(ev.Name) {
+		return
+	}
 	// callback
 	go retry.Try(func() error { dw.notify(ev); return nil })
 
@@ -228,91 +188,34 @@ func (dw *Watcher) onEvent(ev Event) {
 		select {
 		case <-dw.stopped():
 			return
-		case dw.add <- name:
+		case dw.add <- fspath{path: name}:
 		}
 	}()
 }
 
-func (dw *Watcher) prepAgent() {
-	started := make(chan struct{})
-	paths := make(map[string]struct{})
-	for k, v := range dw.paths {
-		paths[k] = v
-	}
-	go func() {
-		close(started)
-		retry.Retry(
-			func() error { return initTree(paths, dw.add, dw.stopped()) },
-			-1,
-			func(e error) { lerrorf("init tree error: %+v\n", e) },
-			time.Second*5)
-	}()
-	<-started
-}
-
-func initTree(
-	current map[string]struct{},
-	add chan<- string,
-	stop <-chan struct{}) error {
-	paths := make(chan string)
-	var wg sync.WaitGroup
-	for k := range current {
-		k := k
-		v, err := filepath.Abs(k)
+func (dw *Watcher) excludePath(p string) bool {
+	for _, ptrn := range dw.exclude {
+		matched, err := filepath.Match(ptrn, p)
 		if err != nil {
 			lerror(err)
 			continue
 		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			d := make(chan string, 10)
-			retry.Try(func() error {
-				dirTree(v, d)
-				return nil
-			})
-			for item := range d {
-				paths <- item
-			}
-		}()
-	}
-	go func() {
-		defer close(paths)
-		wg.Wait()
-	}()
-	for {
-		select {
-		case d, ok := <-paths:
-			if !ok {
-				return nil
-			}
-			select {
-			case add <- d:
-			case <-stop:
-				return nil
-			}
-		case <-stop:
-			return nil
+		if matched {
+			return true
 		}
 	}
+	return false
 }
 
-//-----------------------------------------------------------------------------
-
-func dirTree(root string, found chan string) {
+func dirTree(queryRoot string) <-chan string {
+	found := make(chan string)
 	go func() {
 		defer close(found)
-		ok, err := isDir(root)
-		if err != nil {
-			lerror(err)
-			return
-		}
-		if !ok {
-			found <- root
-			return
-		}
-		err = filepath.Walk(root, func(path string, f os.FileInfo, err error) error {
+		err := filepath.Walk(queryRoot, func(path string, f os.FileInfo, err error) error {
 			if !f.IsDir() {
+				return nil
+			}
+			if filepath.Clean(path) == filepath.Clean(queryRoot) {
 				return nil
 			}
 			found <- path
@@ -322,14 +225,12 @@ func dirTree(root string, found chan string) {
 			lerrorf("%+v", errors.WithStack(err))
 		}
 	}()
+	return found
 }
 
 func isDir(path string) (bool, error) {
 	inf, err := os.Stat(path)
-	if err != nil {
-		return false, err
-	}
-	return inf.IsDir(), nil
+	return inf.IsDir(), err
 }
 
 //-----------------------------------------------------------------------------
