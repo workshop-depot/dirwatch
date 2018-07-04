@@ -16,7 +16,10 @@ import (
 //-----------------------------------------------------------------------------
 
 // Event represents a single file system notification.
-type Event = fsnotify.Event
+type Event struct {
+	Name string
+	Op   fsnotify.Op
+}
 
 //-----------------------------------------------------------------------------
 
@@ -150,7 +153,7 @@ func (dw *Watcher) agent() error {
 		case <-dw.stopped():
 			return nil
 		case ev := <-watcher.Events:
-			dw.onEvent(ev)
+			dw.onEvent(Event(ev))
 		case err := <-watcher.Errors:
 			dw.logger(fmt.Sprintf("error: %+v\n", errors.WithStack(err)))
 		case d := <-dw.add:
