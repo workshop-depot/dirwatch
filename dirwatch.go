@@ -34,7 +34,8 @@ type fspath struct {
 	recursive *bool
 }
 
-// New creates a new *Watcher
+// New creates a new *Watcher. Excluded patterns are based on
+// filepath.Match function patterns.
 func New(notify func(Event), exclude ...string) *Watcher {
 	if notify == nil {
 		panic("notify can not be nil")
@@ -137,7 +138,7 @@ func (dw *Watcher) onAdd(
 		lerror(err)
 		return
 	}
-	recursive, ok := dw.paths[fsp.path]
+	_, ok := dw.paths[fsp.path]
 	if ok {
 		return
 	}
@@ -147,6 +148,7 @@ func (dw *Watcher) onAdd(
 	if err := watcher.Add(fsp.path); err != nil {
 		lerrorf("on add error: %+v\n", errors.WithStack(err))
 	}
+	recursive, _ := dw.paths[fsp.path]
 	if fsp.recursive != nil {
 		recursive = *fsp.recursive
 	}
