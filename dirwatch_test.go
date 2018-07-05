@@ -17,9 +17,7 @@ func TestNew(t *testing.T) {
 	require := require.New(t)
 	// prepare sample home directory to watch over
 	rootDirectory, err := ioutil.TempDir(os.TempDir(), "dirwatch-example")
-	if err != nil {
-		panic(err)
-	}
+	require.NoError(err)
 	os.RemoveAll(rootDirectory)
 	os.Mkdir(rootDirectory, 0777)
 
@@ -41,9 +39,7 @@ func TestNew(t *testing.T) {
 	dir2 := filepath.Join(rootDirectory, "lab2")
 	os.Remove(dir2)
 	err = os.Mkdir(dir2, 0777)
-	if err != nil {
-		panic(err)
-	}
+	require.NoError(err)
 
 	<-time.After(time.Millisecond * 50)
 
@@ -101,6 +97,59 @@ T1:
 	require.Condition(func() bool { return count >= 2 })
 }
 
+func TestRemove(t *testing.T) {
+	require := require.New(t)
+
+	// prepare sample home directory to watch over
+	rootDirectory, err := ioutil.TempDir(os.TempDir(), "dirwatch-example")
+	require.NoError(err)
+	os.RemoveAll(rootDirectory)
+	os.Mkdir(rootDirectory, 0777)
+
+	// our notification callback (I feel it's simpler to
+	// have a callback instead of passing a channel in an API)
+	var events = make(chan Event, 100)
+	notify := func(ev Event) {
+		events <- ev
+	}
+
+	// create the watcher
+	watcher := New(Notify(notify))
+	defer watcher.Stop()
+
+	watcher.Add(rootDirectory, true)
+	<-time.After(time.Millisecond * 50)
+
+	// creating a directory inside the root/home
+	dir2 := filepath.Join(rootDirectory, "lab2")
+	os.Remove(dir2)
+
+	err = os.Mkdir(dir2, 0777)
+	require.NoError(err)
+	<-time.After(time.Millisecond * 50)
+	err = os.Remove(dir2)
+	require.NoError(err)
+	<-time.After(time.Millisecond * 50)
+	err = os.Mkdir(dir2, 0777)
+	require.NoError(err)
+	<-time.After(time.Millisecond * 50)
+
+	actions := 0
+T3:
+	for {
+		select {
+		case ev := <-events:
+			if ev.Op == fsnotify.Create ||
+				ev.Op == fsnotify.Remove {
+				actions++
+			}
+		case <-time.After(time.Millisecond * 60):
+			break T3
+		}
+	}
+	require.Condition(func() bool { return actions > 2 })
+}
+
 func prep() string {
 	rootDirectory := filepath.Join(os.TempDir(), "dirwatch-example-exclude")
 	if err := os.RemoveAll(rootDirectory); err != nil {
@@ -123,7 +172,7 @@ func ExampleWatcher_simple() {
 	watcher.Add(dir, true)
 
 	ioutil.WriteFile(filepath.Join(dir, "text.txt"), nil, 0777)
-	<-time.After(time.Millisecond * 100)
+	<-time.After(time.Millisecond * 300)
 
 	// Output:
 	// text.txt

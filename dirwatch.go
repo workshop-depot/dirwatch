@@ -134,8 +134,11 @@ func (dw *Watcher) start() {
 		retry.Retry(
 			dw.agent,
 			-1,
-			func(e error) {},
-			time.Second*5)
+			func(err error) {
+				e := err.(interface{ CausedBy() interface{} })
+				fmt.Printf(">>> %+v\n", e.CausedBy())
+			},
+			time.Second)
 	}()
 	<-started
 	// HACK:
@@ -276,9 +279,13 @@ func (dw *Watcher) dirTree(queryRoot string) <-chan string {
 	return found
 }
 
-func isDir(path string) (bool, error) {
-	inf, err := os.Stat(path)
-	return inf.IsDir(), err
+func isDir(path string) (ok bool, err error) {
+	var inf os.FileInfo
+	inf, err = os.Stat(path)
+	if inf != nil {
+		ok = inf.IsDir()
+	}
+	return
 }
 
 //-----------------------------------------------------------------------------
