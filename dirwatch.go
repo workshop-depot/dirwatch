@@ -134,7 +134,7 @@ func (dw *Watcher) start() {
 		retry.Retry(
 			dw.agent,
 			-1,
-			func(e error) { dw.logger(fmt.Sprintf("watcher agent error: %+v", e)) },
+			func(e error) {},
 			time.Second*5)
 	}()
 	<-started
