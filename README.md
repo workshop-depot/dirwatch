@@ -15,7 +15,7 @@ notify := func(ev Event) {
 // create the watcher which excludes
 // any folder along the added paths
 // that matches provided pattern(s).
-watcher := New(notify, "/*/*/node_modules")
+watcher := New(Notify(notify), Exclude("/*/*/node_modules"))
 defer watcher.Stop()
 watcher.Add(dir1, true)
 watcher.Add(dir2, false)

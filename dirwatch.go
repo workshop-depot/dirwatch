@@ -91,6 +91,7 @@ func New(opt ...Option) *Watcher {
 		paths:   make(map[string]bool),
 		notify:  o.notify,
 		exclude: o.exclude,
+		logger:  o.logger,
 	}
 	res.ctx, res.cancel = context.WithCancel(context.Background())
 
